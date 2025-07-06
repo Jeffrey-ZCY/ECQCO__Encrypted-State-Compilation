@@ -14,7 +14,8 @@ This project uses **MindSpore Quantum** and **Pyqpanda** to implement a encrypte
 - `benchmarks/`：Store QASM files for quantum circuit simulation.
 - `figure/`：Store the images generated from the experimental results.
 - `result/`：Store the output data and intermediate results of the experimental simulation run.
-- `other/`：Implementation of quantum cryptography tools for other candidate solutions that are unrelated to the solutionscripts/
+- `other/`：Implementation of quantum cryptography tools for other candidate solutions that are unrelated to the solution
+- `scripts/：`
   - `__init__.py`：Initialization file.
   - `circuit_od.py`：The main processing logic of obfuscation decoupling.
   - `utils.py`：Some auxiliary tool functions for quantum circuit processing.
