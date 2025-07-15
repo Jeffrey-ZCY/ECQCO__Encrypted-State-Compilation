@@ -12,7 +12,10 @@ from mindquantum.algorithm.compiler import (compile_circuit, BasicDecompose,
 from mindquantum.core.circuit import Circuit
 from mindquantum.core.parameterresolver import ParameterResolver
 from mindquantum.core.gates import U3, SWAP, X, Measure
+from mindquantum.algorithm.compiler import DAGCircuit, DAGNode
+from mindquantum.core.circuit import Circuit
 pd.options.mode.chained_assignment = None  # default='warn'
+from pyqpanda3.intermediate_compiler import convert_qasm_file_to_qprog
 
 
 class QCManager:
@@ -24,6 +27,7 @@ class QCManager:
         result_path (str): The path where results will be saved.
         circuit: The quantum circuit object (loaded from the QASM file).
     """
+
     def __init__(self, program_path, new_program_path):
         self.program_path = program_path
         self.result_path = new_program_path
@@ -39,7 +43,7 @@ class QCManager:
 
     def read_qasm(self, filepath):
         """
-        Function to read a QASM into a Quantum circuit object
+        Function to read a QASM into a Quantum circuit object by mindspore
         """
         circ = Circuit.from_openqasm(filepath)
         # circ.summary()
@@ -100,56 +104,58 @@ class QCManager:
         index_list = {ele: 0 for ele in qubit_set}
 
         # Iterating over all gate nodes in the DAG
-        for node in dag.topological_sort():
-            if node.gate.name == 'X':
-                # Check if there is a control qubit
-                if len(node.local) > 1:
+        for idx, c in enumerate(dag.layering()):
+            c_dag = DAGCircuit(c)
+            for node in c_dag.topological_sort():
+                if node.gate.name == 'X':
+                    # Check if there is a control qubit
+                    if len(node.local) > 1:
+                        q1 = self.extract_qubit_index(node.local[0])
+                        q2 = self.extract_qubit_index(node.local[1])
+                        cur_index = max(index_list[q1], index_list[q2])
+                        # Change 'X' to 'CX' if there is a control qubit
+                        populate_frame[q1][cur_index] = f"CX ({q1})({q2})"
+                        populate_frame[q2][cur_index] = f"CX ({q1})({q2})"
+                        index_list[q1] = cur_index + 1
+                        index_list[q2] = cur_index + 1
+                    else:
+                        q1 = self.extract_qubit_index(node.local[0])
+                        populate_frame[q1][index_list[q1]] = node.gate.name
+                        index_list[q1] = index_list[q1] + 1
+
+                elif node.gate.name == 'U3':
                     q1 = self.extract_qubit_index(node.local[0])
-                    q2 = self.extract_qubit_index(node.local[1])
-                    cur_index = max(index_list[q1], index_list[q2])
-                    # Change 'X' to 'CX' if there is a control qubit
-                    populate_frame[q1][cur_index] = f"CX ({q1})({q2})"
-                    populate_frame[q2][cur_index] = f"CX ({q1})({q2})"
-                    index_list[q1] = cur_index + 1
-                    index_list[q2] = cur_index + 1
-                else:
+                    populate_frame[q1][index_list[q1]] = \
+                        (f"{node.gate.name} ({node.gate.theta.const})"
+                         f"({node.gate.phi.const})({node.gate.lamda.const})")
+                    index_list[q1] = index_list[q1] + 1
+
+                elif node.gate.name == 'BARRIER':
+                    qargs_list = [self.extract_qubit_index(q) for q in node.local]
+                    cur_index = max(index_list[q] for q in qargs_list)
+                    for q in qargs_list:
+                        populate_frame[q][cur_index] = node.gate.name
+                        index_list[q] = cur_index + 1
+
+                elif node.gate.name in ['RX', 'RZ']:
+                    q1 = self.extract_qubit_index(node.local[0])
+                    rx_param = node.gate.coeff
+                    populate_frame[q1][index_list[q1]] = f"{node.gate.name} ({rx_param})"
+                    index_list[q1] = index_list[q1] + 1
+
+                elif node.gate.name in ['I', 'S', 'H', 'Z', 'Y', 'Measure']:
                     q1 = self.extract_qubit_index(node.local[0])
                     populate_frame[q1][index_list[q1]] = node.gate.name
                     index_list[q1] = index_list[q1] + 1
 
-            elif node.gate.name == 'U3':
-                q1 = self.extract_qubit_index(node.local[0])
-                populate_frame[q1][index_list[q1]] = \
-                    (f"{node.gate.name} ({node.gate.theta.const})"
-                     f"({node.gate.phi.const})({node.gate.lamda.const})")
-                index_list[q1] = index_list[q1] + 1
-
-            elif node.gate.name == 'CX':
-                q1 = self.extract_qubit_index(node.local[0])
-                q2 = self.extract_qubit_index(node.local[1])
-                cur_index = max(index_list[q1], index_list[q2])
-                populate_frame[q1][cur_index] = f"CX ({q1})({q2})"
-                populate_frame[q2][cur_index] = f"CX ({q1})({q2})"
-                index_list[q1] = cur_index + 1
-                index_list[q2] = cur_index + 1
-
-            elif node.gate.name == 'BARRIER':
-                qargs_list = [self.extract_qubit_index(q) for q in node.local]
-                cur_index = max(index_list[q] for q in qargs_list)
-                for q in qargs_list:
-                    populate_frame[q][cur_index] = node.gate.name
-                    index_list[q] = cur_index + 1
-
-            elif node.gate.name in ['RX', 'RZ']:
-                q1 = self.extract_qubit_index(node.local[0])
-                rx_param = node.gate.coeff
-                populate_frame[q1][index_list[q1]] = f"{node.gate.name} ({rx_param})"
-                index_list[q1] = index_list[q1] + 1
-
-            elif node.gate.name in ['I', 'SX', 'H', 'Measure']:
-                q1 = self.extract_qubit_index(node.local[0])
-                populate_frame[q1][index_list[q1]] = node.gate.name
-                index_list[q1] = index_list[q1] + 1
+                elif node.gate.name == 'CX':
+                    q1 = self.extract_qubit_index(node.local[0])
+                    q2 = self.extract_qubit_index(node.local[1])
+                    cur_index = max(index_list[q1], index_list[q2])
+                    populate_frame[q1][cur_index] = f"CX ({q1})({q2})"
+                    populate_frame[q2][cur_index] = f"CX ({q1})({q2})"
+                    index_list[q1] = cur_index + 1
+                    index_list[q2] = cur_index + 1
 
         return populate_frame
 
@@ -209,7 +215,10 @@ class QCManager:
                 {'name': 'I', 'duration': 185},
                 {'name': 'RZ', 'duration': 84},
                 {'name': 'U3', 'duration': 84},
-                {'name': 'Y', 'duration': 84}
+                {'name': 'Y', 'duration': 84},
+                {'name': 'Z', 'duration': 84},
+                {'name': 'S', 'duration': 84},
+                {'name': 'Measure', 'duration': 100}
             ]
         }
 
@@ -220,10 +229,12 @@ class QCManager:
         rz_lengths = self.get_gate_length(device_properties, 'RZ')
         u3_lengths = self.get_gate_length(device_properties, 'U3')
         y_lengths = self.get_gate_length(device_properties, 'Y')
-
-        gate_lengths = {'CX': cx_lengths, 'H': h_lengths, 'I': id_lengths,
-                    'RZ': rz_lengths, 'X': x_lengths,
-                    'U3': u3_lengths, 'Y': y_lengths}
+        z_lengths = self.get_gate_length(device_properties, 'Z')
+        s_lengths = self.get_gate_length(device_properties, 'S')
+        measure_lengths = self.get_gate_length(device_properties, 'Measure')
+        gate_lengths = {'CX': cx_lengths, 'H': h_lengths, 'I': id_lengths,'S': s_lengths,
+                        'RZ': rz_lengths, 'X': x_lengths, 'Measure': measure_lengths,
+                        'U3': u3_lengths, 'Y': y_lengths, 'Z': z_lengths}
         return gate_lengths
 
     def get_gate_length(self, device_properties, gate_name):
@@ -476,3 +487,4 @@ class QCManager:
                 counts.append(counts_)
 
         return counts
+

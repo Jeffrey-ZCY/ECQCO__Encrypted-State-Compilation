@@ -7,15 +7,18 @@ import pandas as pd
 import numpy as np
 from sympy import sympify
 from mindquantum.core.circuit import Circuit
-from mindquantum.core.gates import (X, Y, RX, U3, Measure,
+from mindquantum.core.gates import (X, Y, Z, RX, U3, Measure,
                                     I, RZ, H, PhaseDampingChannel, DepolarizingChannel)
 from mindquantum.algorithm.error_mitigation import query_single_qubit_clifford_elem
 from mindquantum.simulator import decompose_stabilizer
+from math import pi
+
 pd.options.mode.chained_assignment = None  # default='warn'
 
-class DDManager:
+
+class QCSOManager:
     """
-    A class to manage the application of Dynamical Decoupling (DD) to quantum circuits.
+    A class to manage the application of QCSO to quantum circuits.
 
     Attributes:
         gate_lengths (dict): A dictionary containing the length of various quantum gates.
@@ -28,15 +31,75 @@ class DDManager:
         ts (int): A timestamp or counter used in the DD process.
     """
 
-    def __init__(self, gate_lengths, qubits_in_device):
+    def __init__(self, gate_lengths, qubits_in_device, lamb_param, circ_depth):
         self.gate_lengths = gate_lengths
         self.tab = [0] * qubits_in_device
-        self.qubits_to_consider = list(range(qubits_in_device))
+        self.qubits = range(qubits_in_device)
         self.circ = Circuit()
         self.circ_skeleton = Circuit()
         self.layer_set = 5
         self.ts = 0
+        self.lamb_param = lamb_param
+        self.circ_depth = circ_depth
 
+    def gate_to_u3(self, gate, theta_list=None):
+        theta = None
+        phi = None
+        lam = None
+        if theta_list:
+            theta = theta_list[0]
+            if gate == 'U3':
+                phi = theta_list[1]
+                lam = theta_list[2]
+
+        if gate == 'I':
+            return 0, 0, 0
+        elif gate == 'X':
+            return pi, 0, pi
+        elif gate == 'Y':
+            return pi, pi / 2, pi / 2
+        elif gate == 'Z':
+            return 0, 0, pi
+        elif gate == 'H':
+            return pi / 2, 0, pi
+        elif gate == 'S':
+            return 0 , 0, pi / 2
+        elif gate == 'RX' and theta is not None:
+            return theta, -pi / 2, pi / 2
+        elif gate == 'RY' and theta is not None:
+            return theta, 0, 0
+        elif gate == 'RZ' and theta is not None:
+            return 0, 0, theta
+        elif gate == 'U3' and theta is not None:
+            return theta, phi, lam
+        else:
+            raise ValueError("Unknown gate or missing theta")
+
+    def u3_matrix(self, theta, phi, lam):
+        return np.array([
+            [np.cos(theta / 2), -np.exp(1j * lam) * np.sin(theta / 2)],
+            [np.exp(1j * phi) * np.sin(theta / 2), np.exp(1j * (phi + lam)) * np.cos(theta / 2)]
+        ])
+
+    def u3_parameters(selg, U):
+        """Recover θ, φ, λ from a given U3 matrix."""
+        theta = 2 * np.arccos(np.clip(np.abs(U[0, 0]), -1.0, 1.0))  # Ensure domain safety
+
+        if np.isclose(theta, 0):
+            lam = np.angle(U[1, 1])
+            phi = 0
+        elif np.isclose(theta, np.pi):
+            phi = np.angle(U[1, 0])
+            lam = np.angle(-U[0, 1])
+        else:
+            phi = np.angle(U[1, 0]) - np.angle(np.sin(theta / 2))
+            lam = np.angle(-U[0, 1]) - np.angle(np.sin(theta / 2))
+
+        theta = np.real(theta)
+        phi = np.mod(phi + np.pi, 2 * np.pi) - np.pi
+        lam = np.mod(lam + np.pi, 2 * np.pi) - np.pi
+
+        return theta, phi, lam
 
     def parse_param(self, param):
         """
@@ -80,7 +143,8 @@ class DDManager:
             params = []
         return gate_name, params
 
-    def dataframe_to_circ(self, analog_table, qubits_to_consider, mode='normal'):
+
+    def dataframe_free_to_circ(self, analog_table):
         """
         Function to convert analog_table to MindQuantum Circuit
 
@@ -93,7 +157,43 @@ class DDManager:
         Returns:
             Circuit: MindQuantum Circuit.
         """
-        # dd_modes = ['xyxy']
+        self.circ = Circuit()
+        # Number of rows and qubits in the analog IDT
+        n_rows, qubits = analog_table.shape
+        self.tab = [0] * qubits
+        for qubit in range(qubits):
+            # add DD sequence
+            QCSO_sequence_in_single_qubit = self.Add_DD_gates_in_timestep(analog_table, qubit)
+            for el, qcso_el in enumerate(QCSO_sequence_in_single_qubit):
+                keys = [int(k) for k in qcso_el.keys()]
+                qcso_gate = pd.DataFrame({qubit: qcso_el.values()}, index=keys)
+                ind = list(analog_table.index)
+                if keys in ind:
+                    analog_table.loc[keys][el] = qcso_el[0, 0]
+                else:
+                    for col in analog_table.columns:
+                        if col not in qcso_gate.columns:
+                            qcso_gate[col] = ''
+
+                    analog_table = pd.concat([analog_table, qcso_gate], axis=0, ignore_index=False).sort_index()
+        analog_table.to_csv('result/anal_gate.csv')
+        return analog_table
+
+
+
+    def dataframe_to_circ(self, analog_table, mode):
+        """
+        Function to convert analog_table to MindQuantum Circuit
+
+        Args:
+            analog_table (DataFrame): Analog Instruction Table with time values.
+            mode (str): Mode parameter to determine if dynamic decoupling
+                        should be applied ('normal' or 'dynamic_decoupling').
+            qubits_to_consider (list): A list of qubit indices to be considered for DD applications.
+
+        Returns:
+            Circuit: MindQuantum Circuit.
+        """
         self.circ = Circuit()
         # Number of rows and qubits in the analog IDT
         n_rows, qubits = analog_table.shape
@@ -102,7 +202,6 @@ class DDManager:
         # analog_time = list(analog_table.index)
         # The qubits names
         qubits_in_table = list(analog_table.columns)
-        self.qubits_to_consider = qubits_to_consider
         skeleton_flag = None
         # Adding the operations to the quantum circuit
         for ts in range(n_rows):
@@ -193,20 +292,19 @@ class DDManager:
 
         # #Calculate time difference between the two qubits involved in CX
         time_diff = abs(qubit_exec_time - sec_qubit_exec_time)
-
         # Insert DD if necessary
         if qubit_exec_time < sec_qubit_exec_time:
             dd_qubit = qubit_val
 
             if time_diff > 0 and mode != 'normal':
-                self.apply_dynamic_decoupling(dd_qubit, mode, time_diff)
+                self.apply_obfuscation_dynamic_decoupling(dd_qubit, mode, time_diff)
             self.tab[sec_qubit] += self.gate_lengths['CX'][0]
             self.tab[qubit_val] = self.tab[sec_qubit]
         else:
             dd_qubit = sec_qubit
 
             if time_diff > 0 and mode != 'normal':
-                self.apply_dynamic_decoupling(dd_qubit, mode, time_diff)
+                self.apply_obfuscation_dynamic_decoupling(dd_qubit, mode, time_diff)
             self.tab[qubit_val] += self.gate_lengths['CX'][0]
             self.tab[sec_qubit] = self.tab[qubit_val]
 
@@ -221,50 +319,14 @@ class DDManager:
             qubit_val (int): The current qubit.
             mode (str): 'normal' for no DD, 'xyxy' for dynamic decoupling.
         """
-        if mode != 'normal' and qubit_val in self.qubits_to_consider:
-            self.circ += DepolarizingChannel(0.002).on(qubit_val)
-        if mode != 'normal' and qubit_val not in self.qubits_to_consider:
-            self.circ += DepolarizingChannel(0.02).on(qubit_val)
+        # if mode != 'normal' and qubit_val in self.qubits_to_consider:
+        #     self.circ += DepolarizingChannel(0.002).on(qubit_val)
+        # if mode != 'normal' and qubit_val not in self.qubits_to_consider:
+        #     self.circ += DepolarizingChannel(0.02).on(qubit_val)
         # Insert DD if necessary
-
         self.tab[qubit_val] += self.gate_lengths['I'][0]
         # Add the CX gate to the circuit
         self.circ += I.on(qubit_val)
-
-    def apply_dynamic_decoupling(self, qubit_val, mode, time_diff):
-        """
-        Apply dynamic decoupling (DD) gates to a qubit during its idle time.
-
-        Args:
-            qubit_val (int): The qubit on which to apply DD.
-            mode (str): 'normal' for no DD, 'xyxy' for dynamic decoupling.
-            time_diff (float): The duration of idle time.
-        """
-        idle_time = time_diff
-        dd_seq_length = self.gate_lengths['X'][0] * 2
-        num_pulses = int(idle_time // dd_seq_length)
-        if qubit_val not in self.qubits_to_consider:
-            # self.circ += ThermalRelaxationChannel(0.20, 0.15,
-            #                                       idle_time * 20).on(qubit_val)
-            self.circ += PhaseDampingChannel(0.2).on(qubit_val)
-        if mode == 'xx' and qubit_val in self.qubits_to_consider:
-            for _ in range(num_pulses):
-                self.circ += X.on(qubit_val)
-                # self.circ += ThermalRelaxationChannel(0.20, 0.15,
-                #                         (idle_time - num_pulses * dd_seq_length)/2).on(qubit_val)
-                self.circ += PhaseDampingChannel(0.02).on(qubit_val)
-                self.circ += X.on(qubit_val)
-                # self.circ += ThermalRelaxationChannel(0.20, 0.15,
-                #                         (idle_time - num_pulses * dd_seq_length)/2).on(qubit_val)
-                self.circ += PhaseDampingChannel(0.02).on(qubit_val)
-        elif mode =='xyxy' and qubit_val in self.qubits_to_consider:
-            dd_seq_length = self.gate_lengths['X'][0] * 2 + self.gate_lengths['Y'][0] * 2
-            num_pulses = int(idle_time // dd_seq_length)
-            for _ in range(num_pulses):
-                self.circ += X.on(qubit_val)
-                self.circ += Y.on(qubit_val)
-                self.circ += X.on(qubit_val)
-                self.circ += Y.on(qubit_val)
 
     def handle_single_qubit_gate(self, gate_name, params, qubit_val):
         """
@@ -282,6 +344,14 @@ class DDManager:
             self.tab[qubit_val] += tab_gate
         elif gate_name == 'X':
             self.circ += X.on(qubit_val)
+            tab_gate = self.gate_lengths.get(gate_name, [0])[0]
+            self.tab[qubit_val] += tab_gate
+        elif gate_name == 'Y':
+            self.circ += Y.on(qubit_val)
+            tab_gate = self.gate_lengths.get(gate_name, [0])[0]
+            self.tab[qubit_val] += tab_gate
+        elif gate_name == 'Z':
+            self.circ += Z.on(qubit_val)
             tab_gate = self.gate_lengths.get(gate_name, [0])[0]
             self.tab[qubit_val] += tab_gate
         elif gate_name == 'RZ':
@@ -303,6 +373,164 @@ class DDManager:
             tab_gate = self.gate_lengths.get(gate_name, [0])[0]
             self.tab[qubit_val] += tab_gate
 
+    def Add_DD_gates_in_timestep(self, analog_table, q):
+        """
+        Process the gates for each qubit in a given timestep and update the circuit.
+
+        Args:
+            analog_table (DataFrame): The analog instruction table.
+            qubits_in_table (list): List of qubits in the analog table.
+            mode (str): 'normal' for no DD, 'xyxy' for dynamic decoupling.
+            skeleton_flag :
+        """
+        n_rows, qubits = analog_table.shape
+        XY_4_time = (self.gate_lengths.get('X', [0])[0] + self.gate_lengths.get('Y', [0])[0]) * 2
+        XX_time = self.gate_lengths.get('X', [0])[0] * 2
+        RZ_time = self.gate_lengths.get('RZ', [0])[0]
+        self.tab[q] = 0
+        analog_rows = analog_table.index.tolist()
+        free_time = []
+        # Find all the idle time on this qubit
+        for ts in range(n_rows):
+            tab_gate = 0
+            gate_info = analog_table.iloc[ts, q]
+            cur_time = analog_rows[ts]
+            if gate_info:
+                gate_name, params = self.extract_gate_params(gate_info)
+                tab_gate = self.gate_lengths.get(gate_name, [0])[0]
+                self.tab[q] += tab_gate
+            if cur_time > self.tab[q]:
+                free_time.append([self.tab[q] - tab_gate, cur_time - tab_gate])
+                self.tab[q] = cur_time
+            elif cur_time < self.tab[q]:
+                # Consider the impact of CNOT on the calculation of idle time in the simulation frame
+                free_time[-1][1] = free_time[-1][1] - (self.tab[q] - cur_time)
+                if free_time[-1][0] == free_time[-1][1]:
+                    free_time.pop()
+                self.tab[q] = cur_time
+            else:
+                pass
+
+        # Merge adjacent idle time periods
+        for index, space_time in enumerate(free_time):
+            if index == len(free_time) - 1: break
+            while space_time[1] == free_time[index + 1][0]:
+                free_time[index][1] = free_time[index + 1][1]
+                free_time.pop(index + 1)
+                if index == len(free_time) - 1: break
+
+        new_DD_sequence = []
+        for index, space_time in enumerate(free_time):
+            rest_free_time = space_time[1] - space_time[0]
+            cur_free_time = space_time[0]
+            gate_flag = 0
+            while rest_free_time >= XY_4_time:
+                # add X-Y-X-Y sequence
+                cur_free_time += self.gate_lengths.get('X', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'X'})
+                cur_free_time += self.gate_lengths.get('Y', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'Y'})
+                cur_free_time += self.gate_lengths.get('X', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'X'})
+                cur_free_time += self.gate_lengths.get('Y', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'Y'})
+                rest_free_time -= XY_4_time
+                gate_flag = 1
+
+            while rest_free_time >= XX_time:
+                # add X-X sequence
+                cur_free_time += self.gate_lengths.get('X', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'X'})
+                cur_free_time += self.gate_lengths.get('X', [0])[0]
+                new_DD_sequence.append({cur_free_time: 'X'})
+                rest_free_time -= XX_time
+                gate_flag = 1
+
+            if rest_free_time >= RZ_time:
+                # add RZ-RZ sequence and Merge one of the RZs with the adjacent single gate
+                # Get information about the previous quantum gate of the current simulation frame
+
+                # find previous gate
+                max_id = -1
+                for i, num in enumerate(analog_rows):
+                    if num <= cur_free_time and (max_id == -1 or i > max_id):
+                        max_id = i
+                if gate_flag:
+                    pre_gate_info = next(iter(new_DD_sequence[-1].values()))
+                    flag = True
+                else:
+                    pre_gate_info = analog_table.iloc[max_id, q]
+                    flag = False
+
+                # find after gate
+                after_gate_info = ''
+                i = 0
+                while after_gate_info == '':
+                    i += 1
+                    after_gate_info = analog_table.iloc[max_id + i, q]
+
+                pre_gate_name, pre_params = self.extract_gate_params(pre_gate_info)
+                after_gate_name, after_params = self.extract_gate_params(after_gate_info)
+                if pre_gate_name != 'CX' and pre_gate_name:
+                    theta, phi, lamda = self.gate_to_u3(pre_gate_name, pre_params)
+                    U1 = self.u3_matrix(theta, phi, lamda)
+                    Z = self.u3_matrix(0, 0, np.pi)
+                    U = U1 @ Z
+                    theta, phi, lamda = self.u3_parameters(U)
+                    if flag:
+                        new_DD_sequence.pop()
+                        new_DD_sequence.append({cur_free_time: f'U3 ({theta})({phi})({lamda})'})
+                    else:
+                        analog_table.iloc[max_id, q] = f'U3 ({theta})({phi})({lamda})'
+                elif pre_gate_name == 'CX' and after_gate_name != 'CX':
+                    theta, phi, lamda = self.gate_to_u3(after_gate_name, after_params)
+                    U1 = self.u3_matrix(theta, phi, lamda)
+                    Z = self.u3_matrix(0, 0, np.pi)
+                    U = U1 @ Z
+                    theta, phi, lamda = self.u3_parameters(U)
+                    analog_table.iloc[max_id + 1, q] = f'U3 ({theta})({phi})({lamda})'
+
+                else:
+                    pass
+
+                cur_free_time += self.gate_lengths.get('RZ', [0])[0]
+                new_DD_sequence.append({cur_free_time: f"RZ ({np.pi})"})
+        return new_DD_sequence
+
+    def apply_obfuscation_dynamic_decoupling(self, qubit_val, mode, time_diff):
+        """
+        Apply dynamic decoupling (DD) gates to a qubit during its idle time.
+
+        Args:
+            qubit_val (int): The qubit on which to apply DD.
+            mode (str): 'normal' for no DD, 'xyxy' for dynamic decoupling.
+            time_diff (float): The duration of idle time.
+        """
+        idle_time = time_diff
+        dd_seq_length = self.gate_lengths['X'][0] * 2
+        num_pulses = int(idle_time // dd_seq_length)
+        # if qubit_val not in self.qubits_to_consider:
+        # self.circ += ThermalRelaxationChannel(0.20, 0.15,
+        #                                       idle_time * 20).on(qubit_val)
+        # circ += PhaseDampingChannel(0.2).on(qubit_val)
+        if mode == 'xx' and qubit_val in self.qubits_to_consider:
+            for _ in range(num_pulses):
+                self.circ += X.on(qubit_val)
+                # self.circ += ThermalRelaxationChannel(0.20, 0.15,
+                #                         (idle_time - num_pulses * dd_seq_length)/2).on(qubit_val)
+                # self.circ += PhaseDampingChannel(0.02).on(qubit_val)
+                self.circ += X.on(qubit_val)
+                # self.circ += ThermalRelaxationChannel(0.20, 0.15,
+                #                         (idle_time - num_pulses * dd_seq_length)/2).on(qubit_val)
+                # self.circ += PhaseDampingChannel(0.02).on(qubit_val)
+        elif mode == 'xyxy' and qubit_val in self.qubits_to_consider:
+            dd_seq_length = self.gate_lengths['X'][0] * 2 + self.gate_lengths['Y'][0] * 2
+            num_pulses = int(idle_time // dd_seq_length)
+            for _ in range(num_pulses):
+                self.circ += X.on(qubit_val)
+                self.circ += Y.on(qubit_val)
+                self.circ += X.on(qubit_val)
+                self.circ += Y.on(qubit_val)
 
     def handle_non_clifford_gate(self, gate_name, params, qubit_val):
         """

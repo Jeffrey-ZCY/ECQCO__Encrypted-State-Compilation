@@ -1,14 +1,18 @@
+import glob
+import os
+
 from pyqpanda3.core import *
 import numpy as np
-import random
+import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Union
 from pyqpanda3.quantum_info import Unitary
 from pyqpanda3.intermediate_compiler import convert_qprog_to_qasm, convert_qasm_string_to_qprog
+from pyqpanda3.intermediate_compiler import convert_qasm_file_to_qprog
 
 
-class RotationQHE:
-    def __init__(self, n_qubits: int):
+class QCOOManager:
+    def __init__(self, n_qubits, input_path, result_path):
         """init QCOO"""
         self.n_qubits = n_qubits
         self.key = None  # Initial key
@@ -16,6 +20,8 @@ class RotationQHE:
         self.updated_gates = []
         self.init_state = None
         self.qvm = CPUQVM()
+        self.input_path = input_path
+        self.result_path = result_path
 
     def generate_key(self) -> Tuple[List[int], List[int]]:
         """Generate quantum one-time pad key (a, b)"""
@@ -42,14 +48,14 @@ class RotationQHE:
         self.init_state = initial_state_str
         # 构建量子虚拟机和量子电路
         homomorphic_circuit = QCircuit()
-
         # 初始化量子比特和经典比特,创建初始量子电路
         encrypted_circuit = QCircuit(self.n_qubits)
         # 若为空，则重置全0态为初始量子态
-        qubit = range(self.n_qubits)
+        if self.init_state == None:
+            self.init_state = '0' * self.n_qubits
         # 制备初始态的量子线路，采用基态编码
         cir_encode = Encode()
-        cir_encode.basic_encode(qubit, self.init_state)
+        cir_encode.basic_encode(range(self.n_qubits), self.init_state)
         encrypted_circuit << cir_encode.get_circuit()
 
         # 应用量子一次一密加密 X^a Z^b
@@ -67,6 +73,7 @@ class RotationQHE:
         # Handle quantum gate replacement and key update
         for op in operations:
             gate_type = op.name()
+            gate_angle = op.parameters()
             targets = op.target_qubits()
             isdagger = op.is_dagger()
 
@@ -76,11 +83,11 @@ class RotationQHE:
                     angle = np.pi / 4 if current_key[0][j] == 0 else -np.pi / 4
                     homomorphic_circuit << RZ(j, angle)
 
-                else:
-                    j = targets[0]
-                    angle = -np.pi / 4 if current_key[0][j] == 0 else np.pi / 4
-                    homomorphic_circuit << RZ(j, angle)
-                    # T/T†门 gates does not update the key.
+            elif gate_type == "P" and gate_angle == [-0.7853981633974483]:
+                j = targets[0]
+                angle = -np.pi / 4 if current_key[0][j] == 0 else np.pi / 4
+                homomorphic_circuit << RZ(j, angle)
+                # T/T†门 gates does not update the key.
             else:
                 # Handle Clifford gates and update the key
                 if gate_type == "H":
@@ -163,8 +170,6 @@ class RotationQHE:
         qc << homomorphic_circuit
         prog = QProg()
         prog << qc
-        qasm = convert_qprog_to_qasm(prog)
-        print('qasm:\n', qasm)
         return qc
 
     def decrypt(self, computed_circuit: QCircuit) -> QCircuit:
@@ -190,13 +195,13 @@ class RotationQHE:
 
     def simulate(self, circuit: QCircuit, initial_state_str: str = None, shots: int = 1024) -> dict:
         """
-        Simulate the entire quantum homomorphic encryption process
+        simulate QC by rotationQHE
         Args:
             circuit: The original quantum circuit (QCircuit object)
             initial_state_str: The string of the initial quantum state, such as "001"
             shots: The number of simulation times
         Returns:
-            The measurement result statistics (in string form)
+            the encrypted quantum circuit and the decryption key after key update
         """
         # Generate a key
         self.generate_key()
@@ -243,13 +248,86 @@ class RotationQHE:
         if not all(c in ['0', '1'] for c in state_str):
             raise ValueError("量子态字符串只能包含'0'和'1'")
 
-        n_qubits = len(state_str)
+        self.n_qubits = len(state_str)
         index = int(state_str, 2)
 
-        state_vector = [0.0] * (2 ** n_qubits)
+        state_vector = [0.0] * (2 ** self.n_qubits)
         state_vector[index] = 1.0
 
         return state_vector
+
+    def QCOO(self, initial_state_str=None):
+        """
+        Implementation of the QCOO scheme
+        Args:
+            circuit: The original quantum circuit (QCircuit object)
+            initial_state_str: The string of the initial quantum state, such as "001"
+            shots: The number of simulation times
+        Returns:
+            the encrypted quantum circuit and the decryption key after key update
+        """
+        # Convert QASM file to QCircuit
+        prog_file = convert_qasm_file_to_qprog(self.input_path)
+        circuit = prog_file.to_circuit()
+        # Generate a key
+        self.generate_key()
+        # Encrypt
+        encrypted_circuit, updated_gates, _ = self.encrypt(circuit, initial_state_str)
+        print('Enc:', draw_qprog(encrypted_circuit))
+        # Homomorphic computation
+        computed_circuit = self.homomorphic_compute(encrypted_circuit, updated_gates)
+        print('QHE:', draw_qprog(computed_circuit))
+        decrypted_circuit = self.decrypt(computed_circuit)
+        print('Dec:', draw_qprog(decrypted_circuit))
+        prog = QProg()
+        prog << decrypted_circuit
+        for i in range(self.n_qubits):
+            prog << measure(i, i)
+        qasm = convert_qprog_to_qasm(prog)
+        with open(f'{self.result_path}_QCOO.qasm', 'w', encoding='utf-8') as file:
+            file.write(qasm)
+        return f'{self.result_path}_QCOO.qasm', self.final_key
+
+    def run_example(self):
+        """Run the quantum homomorphic encryption example of the Toffoli gate"""
+        # 创建Toffoli门分解线路
+        toffoli_circuit = create_toffoli_circuit()
+
+        # 测试不同的明文量子态（字符串形式）
+        states = ["011"]
+        prog_file = convert_qasm_file_to_qprog(self.input_path)
+        circuit = prog_file.to_circuit()
+        results = []
+        for state_str in states:
+            counts = self.simulate(circuit, state_str)
+            results.append(counts)
+
+        for i, counts in enumerate(results):
+            print(f"明文量子态 |{states[i]}>:")
+            print(counts)
+            print()
+
+        # Visualize the results
+        plt.figure(figsize=(15, 10))
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        all_states = [f"{i:03b}" for i in range(8)]
+
+        for i, counts in enumerate(results):
+            plt.subplot(2, 2, i + 1)
+
+            # Ensure that each sub-plot contains all 8 states
+            plot_counts = {state: counts.get(state, 0) for state in all_states}
+            keys = sorted(plot_counts.keys())
+            values = [plot_counts[key] for key in keys]
+
+            plt.bar(keys, values)
+            plt.title(f"|{states[i]}> 加密解密结果")
+            plt.xlabel("量子态")
+            plt.ylabel("计数")
+            plt.xticks(rotation=45)
+
+        plt.tight_layout()
+        plt.show()
 
 
 def create_toffoli_circuit1() -> QCircuit:
@@ -292,48 +370,18 @@ def create_toffoli_circuit() -> QCircuit:
     return qc
 
 
-def QCOO():
-    """Run the quantum homomorphic encryption example of the Toffoli gate"""
-    n_qubits = 3
-    qhe = RotationQHE(n_qubits)
-    # 创建Toffoli门分解线路
-    toffoli_circuit = create_toffoli_circuit()
-
-    # 测试不同的明文量子态（字符串形式）
-    states = ["011"]
-
-    results = []
-    for state_str in states:
-        counts = qhe.simulate(toffoli_circuit, state_str)
-        results.append(counts)
-
-    for i, counts in enumerate(results):
-        print(f"明文量子态 |{states[i]}>:")
-        print(counts)
-        print()
-
-    # Visualize the results
-    plt.figure(figsize=(15, 10))
-    plt.rcParams['font.sans-serif'] = ['SimHei']
-    all_states = [f"{i:03b}" for i in range(8)]
-
-    for i, counts in enumerate(results):
-        plt.subplot(2, 2, i + 1)
-
-        # Ensure that each sub-plot contains all 8 states
-        plot_counts = {state: counts.get(state, 0) for state in all_states}
-        keys = sorted(plot_counts.keys())
-        values = [plot_counts[key] for key in keys]
-
-        plt.bar(keys, values)
-        plt.title(f"|{states[i]}> 加密解密结果")
-        plt.xlabel("量子态")
-        plt.ylabel("计数")
-        plt.xticks(rotation=45)
-
-    plt.tight_layout()
-    plt.show()
-
-
 if __name__ == "__main__":
-    QCOO()
+    PREFIX_PATH = "benchmarks/"
+    filelist = glob.glob(os.path.join(PREFIX_PATH, '*.qasm'))
+    NEW_PATH = 'result/QCOO/'
+
+    for program_ in filelist:
+        path, program_name = os.path.split(program_)
+        input_path = os.path.join(PREFIX_PATH, program_name)
+        result_path = os.path.join(NEW_PATH, program_name)
+        # imply QCOO
+        init_states = "011"
+        n_qubits = len(init_states)
+        qcoo = QCOOManager(n_qubits, input_path, result_path)
+        QCOO_path, final_key = qcoo.QCOO(init_states)
+        qcoo.run_example()

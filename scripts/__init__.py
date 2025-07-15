@@ -3,6 +3,6 @@
 # from circuit_dd import DDManager
 """
 from .utils import QCManager
-from .circuit_od import DDManager
+from .circuit_od import QCSOManager
 
-__all__ = ['QCManager', 'DDManager']
+__all__ = ['QCManager', 'QCSOManager']

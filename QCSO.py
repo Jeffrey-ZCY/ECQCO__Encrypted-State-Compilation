@@ -7,8 +7,12 @@ import glob
 import pandas as pd
 from mindquantum.algorithm.compiler import DAGCircuit
 from scripts import QCManager
-from scripts import DDManager
+from scripts import QCSOManager
+from mindquantum.io import OpenQASM
+
 pd.options.mode.chained_assignment = None  # default='warn'
+from mindquantum.simulator import Simulator
+from mindquantum.core.circuit import Circuit
 
 
 def initialize_params(circ_prep):
@@ -22,13 +26,11 @@ def initialize_params(circ_prep):
         program_qubits (int): The number of qubits in the quantum circuit.
         total_shots (int): The total number of shots (experiments) to be executed.
     """
-    shots = 2192
-    repeats = 2
     program_qubits = circ_prep.num_qubits_from_qasm()
     if program_qubits > 8:
         repeats = 4
-    total_shots = int(repeats * shots)
-    return program_qubits, total_shots
+    return program_qubits
+
 
 def compile_circuit(circ_prep, program):
     """
@@ -44,10 +46,14 @@ def compile_circuit(circ_prep, program):
         circuit_depth (int): The depth of the compiled circuit, representing the
                              longest path through the DAG.
     """
-    qc_out = circ_prep.recursive_compile_noise_adaptive([circ_prep.read_qasm(program)])[0]
+    # qc_out = circ_prep.recursive_compile_noise_adaptive([circ_prep.read_qasm(program)])[0]
+    qc_out = circ_prep.read_qasm(program)
+    # sim = Simulator('mqvector', 6)
+    # result = sim.sampling(qc_out, shots=1000)
     dag = DAGCircuit(qc_out)
     circuit_depth = dag.depth()
     return dag, circuit_depth
+
 
 def generate_gate_lengths_and_frames(circ_prep, dag, circuit_depth, new_program_path):
     """
@@ -64,7 +70,7 @@ def generate_gate_lengths_and_frames(circ_prep, dag, circuit_depth, new_program_
         analog_frame (DataFrame): Analog frame created from the discrete frame.
     """
     qubit_set = list(range(circ_prep.num_qubits_from_qasm()))
-    empty_frame = circ_prep.create_instruction_table(qubit_set, circuit_depth + 10)
+    empty_frame = circ_prep.create_instruction_table(qubit_set, circuit_depth)
     p_frame = circ_prep.populate_instruction_table(qubit_set, dag, empty_frame)
 
     discrete_frame = circ_prep.zero_filter(p_frame)
@@ -75,6 +81,50 @@ def generate_gate_lengths_and_frames(circ_prep, dag, circuit_depth, new_program_
     frame_name = f"{new_program_path}_analog_IDT_Frame.csv"
     analog_frame.to_csv(frame_name, index=False)
     return gate_lengths, analog_frame
+
+
+def make_qubit_length_same(analog_frame):
+    """
+    Make the durations of all qubits in the quantum circuit the same
+
+    Args:
+        analog_frame (DataFrame): Analog frame created from the discrete frame.
+    Returns:
+        analog_frame (DataFrame): Analog frame after adjustment
+    """
+    # 步骤1：确定所有列中最大的'measure'标签
+    max_measure_idx = None
+    for col in analog_frame.columns:
+        measure_indices = analog_frame.index[analog_frame[col] == 'Measure'].tolist()
+        if measure_indices:
+            current_max = max(measure_indices)
+            if max_measure_idx is None or current_max > max_measure_idx:
+                max_measure_idx = current_max
+
+            # 步骤2：处理每列，移动最后出现的'Measure'    if max_measure_idx is not None:        for col in analog_frame.columns:
+            # 找到该列最后出现的'Measure'索引
+            measure_indices = analog_frame.index[analog_frame[col] == 'Measure'].tolist()
+            if not measure_indices:
+                continue
+
+            last_measure_idx = max(measure_indices)
+
+            # 如果该列最后一个'measure'不在最大索引处，则移动
+            if last_measure_idx != max_measure_idx:
+                # 清空原位置
+                analog_frame.loc[last_measure_idx, col] = ''
+
+                # 填充原位置到最大索引之间的区域
+                fill_range = analog_frame.index[
+                    (analog_frame.index > last_measure_idx) & (analog_frame.index < max_measure_idx)]
+                if not fill_range.empty:
+                    analog_frame.loc[fill_range, col] = ''
+
+                # 将'measure'移动到最大索引处
+                analog_frame.loc[max_measure_idx, col] = 'Measure'
+
+    return analog_frame
+
 
 def sim_baseline_circ(circ_prep, total_shots, all_circuits, baseline_counts):
     """
@@ -101,6 +151,7 @@ def sim_baseline_circ(circ_prep, total_shots, all_circuits, baseline_counts):
         all_el_fidelity.append(fide)
     all_el_fidelity_txt = pd.DataFrame(all_el_fidelity)
     all_el_fidelity_txt.to_csv(f'{circ_prep.result_path}_all_el_fidelity.txt', index=False)
+
 
 def sim_skeleton_circ(circ_prep, total_shots, all_skeleton_circuits, baseline_counts):
     """
@@ -131,9 +182,10 @@ def sim_skeleton_circ(circ_prep, total_shots, all_skeleton_circuits, baseline_co
     (all_skeleton_el_fidelity_txt.to_csv
      (f'{circ_prep.result_path}_all_skeleton_el_fidelity.txt', index=False))
 
-def dd_for_baseline_circ(all_combinations, dd_manager, analog_table, circ_prep):
+
+def qcso_for_baseline_circ(qcso_manager, analog_table, circ_prep):
     """
-    Generate DD sequences for the baseline circuit.
+    Generate QCSO sequences for the baseline circuit.
 
     Args:
         all_combinations (list): List of all possible qubit combinations for DD.
@@ -144,50 +196,20 @@ def dd_for_baseline_circ(all_combinations, dd_manager, analog_table, circ_prep):
     Returns:
         list: List of circuits generated with DD sequences applied.
     """
-    all_circuits = []
-    all_gate_counts = []
-    for el in all_combinations:
-        # Creating the circuit for particular DD combination -- XX
-        baseline_circ = dd_manager.dataframe_to_circ(analog_table,
-                                              qubits_to_consider=list(el), mode='xx')
-        all_circuits.append(baseline_circ)
-        op_dicts = circ_prep.gather_all_gate_counts(baseline_circ)
-        all_gate_counts.append(op_dicts)
+    # Creating the circuit for particular DD combination -- XX
+    analog_table = qcso_manager.dataframe_free_to_circ(analog_table)
+    qcso_circ = qcso_manager.dataframe_to_circ(analog_table, mode='normal')
+    # op_dicts = circ_prep.gather_all_gate_counts(qcso_circ)
+    return qcso_circ, analog_table
 
-    return all_circuits
 
-def dd_for_skeleton_circ(all_combinations, dd_manager, analog_table, circ_prep):
-    """
-    Generate DD sequences for the skeleton circuit.
-
-    Args:
-        all_combinations (list): List of all possible qubit combinations for DD.
-        dd_manager (DDManager): Manager responsible for handling DD operations.
-        analog_table (pd.DataFrame): Analog instruction table for the circuit.
-        circ_prep (QuantumCircuitManager): Instance used for managing circuit operations.
-
-    Returns:
-        list: List of circuits generated with DD sequences applied.
-    """
-    all_circuits = []
-    all_skeleton_gate_counts = []
-    for el in all_combinations:
-        # Creating the circuit for particular DD combination -- XX
-        circ = dd_manager.dataframe_to_skeleton_circ(analog_table,
-                                                         qubits_to_consider=list(el), mode='xx')
-        all_circuits.append(circ)
-        op_dicts = circ_prep.gather_all_gate_counts(circ[0])
-        all_skeleton_gate_counts.append(op_dicts)
-
-    return all_circuits
-
-def generate_baseline_circuit(circ_prep, dd_manager, analog_frame, program_qubits, total_shots):
+def generate_baseline_circuit(circ_prep, qcso_manager, analog_frame, program_qubits, total_shots):
     """
     Generate the baseline circuit and execute it on an ideal machine.
 
     Args:
         circ_prep (QuantumCircuitManager): Manager handling circuit operations.
-        dd_manager (DDManager): Manager responsible for handling DD operations.
+        qcso_manager (qcsoManager): Manager responsible for handling qcso operations.
         analog_frame (pd.DataFrame): Analog instruction table for the circuit.
         program_qubits (int): Number of qubits in the program.
         total_shots (int): Total number of shots for the experiment.
@@ -195,13 +217,13 @@ def generate_baseline_circuit(circ_prep, dd_manager, analog_frame, program_qubit
     Returns:
         list: Measurement counts from executing the baseline circuit on the ideal machine.
     """
-    baseline_circ = dd_manager.dataframe_to_circ(analog_frame,
-                                qubits_to_consider=list(range(program_qubits)), mode='normal')
+    baseline_circ = qcso_manager.dataframe_to_circ(analog_frame, mode='normal')
     baseline_counts = circ_prep.execute_on_ideal_machine([baseline_circ],
-                                        total_shots, mode='normal')
+                                                         total_shots, mode='normal')
     return baseline_counts
 
-def QCSO(program, new_program_path):
+
+def QCSO(program, new_program_path, lamb_param, total_shots):
     """
     Execute all experiments on the given program and save results.
 
@@ -211,47 +233,35 @@ def QCSO(program, new_program_path):
     Returns:
         dict: A dictionary containing data from all experiments.
     """
+
     circ_prep = QCManager(program, new_program_path)
-    program_qubits, total_shots = initialize_params(circ_prep)
+    program_qubits = initialize_params(circ_prep)
     dag, circuit_depth = compile_circuit(circ_prep, program)
     gate_lengths, analog_frame = generate_gate_lengths_and_frames(circ_prep,
-                                        dag, circuit_depth, new_program_path)
-    dd_manager = DDManager(gate_lengths, program_qubits)
-    # Find all possible DD combinations
-    # all combinations is a list of all possible combinations of qubits
-    all_combinations, _, _ = dd_manager.generate_combinations(analog_frame)
-    # Generate baseline circuit and counts
-    baseline_counts = generate_baseline_circuit(circ_prep, dd_manager, analog_frame, program_qubits,
-                                                               total_shots)
+                                                                  dag, circuit_depth, new_program_path)
+    analog_frame = make_qubit_length_same(analog_frame)
+    qcso_manager = QCSOManager(gate_lengths, program_qubits, lamb_param, analog_frame.index[-1])
+    # baseline_counts = generate_baseline_circuit(circ_prep, qcso_manager, analog_frame, program_qubits, total_shots)
     # Generating all DD sequences for circuit
-    print('Generating all DD sequences for baseline circuit')
-    all_circuits = dd_for_baseline_circ(all_combinations, dd_manager,
-                                        analog_frame, circ_prep)
-    circ_prep.save_circuit_svg(all_circuits[0], 'baseline')
-    circ_prep.save_circuit_svg(all_circuits[-1], 'baseline_all')
-    print('Generating all DD sequences for skeleton circuit')
+    print('Generating baseline circuit')
+    qcso_manager.circ, analog_table = qcso_for_baseline_circ(qcso_manager, analog_frame, circ_prep)
+    circ_prep.save_circuit_svg(qcso_manager.circ, 'ECQCOline')
+    print('Generating ECQCO sequences for baseline circuit')
+    ECQCO_counts = generate_baseline_circuit(circ_prep, qcso_manager, analog_table, program_qubits, total_shots)
+    openqasm = OpenQASM()
+    openqasm.to_file(new_program_path, qcso_manager.circ)
 
-    # all_skeleton_circuits = dd_for_skeleton_circ(all_combinations, dd_manager,
-    #                                              analog_frame, circ_prep)
-    # circ_prep.save_circuit_svg(all_skeleton_circuits[0][0], 'skeleton')
-    # Circuit conversion qasm for particular DD combination
-    # circ_prep.circ_to_qasm(all_circuits, sequence_strings, "baseline")
-    # circ_prep.circ_to_delay_qasm(all_circuits, sequence_strings, "baseline")
-    # circ_prep.circ_to_qasm(all_skeleton_circuits, sequence_strings, "skeleton")
-    # circ_prep.circ_to_delay_qasm(all_skeleton_circuits, sequence_strings, "skeleton")
+    print(f'ECQCO circuit successfully saved to {new_program_path}')
+    return qcso_manager.circ, qcso_manager.circ.depth(with_single=True, with_barrier=False), qcso_manager.circ.depth(
+        with_single=False, with_barrier=False), ECQCO_counts
 
-    print('Real Machine Simulation Step for baseline circ')
-    sim_baseline_circ(circ_prep, total_shots, all_circuits, baseline_counts)
-    # print('Real Machine Simulation Step for skeleton circ')
-    # sim_skeleton_circ(circ_prep, total_shots, all_skeleton_circuits, baseline_counts)
-    print(f'DD successfully saved to {new_program_path}')
 
 if __name__ == '__main__':
-    PREFIX_PATH = "benchmarks/"
+    PREFIX_PATH = "result/QCOO/"
     filelist = glob.glob(os.path.join(PREFIX_PATH, '*.qasm'))
     NEW_PATH = 'result/'
 
     for program_ in filelist:
         path, program_name = os.path.split(program_)
         each_program_path = os.path.join(NEW_PATH, program_name)
-        QCSO(program_, each_program_path)
+        QCSO(program_, each_program_path, lamb_param=2, total_shots=10000)

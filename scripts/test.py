@@ -1,0 +1,91 @@
+from mindquantum.core.circuit import Circuit
+from mindquantum.core.gates import Measure
+import numpy as np  # 导入numpy库并简写为np
+from mindquantum.simulator import Simulator  # 从mindquantum.simulator中导入Simulator类
+from mindquantum.core.gates import X, H, Z, S, RZ  # 导入量子门H, X, RY
+
+# qc = Circuit()
+# qc += X.on(0)
+# qc += X.on(1)
+# qc += X.on(0)
+# qc += Z.on(1)
+# qc += X.on(2)
+# qc += H.on(2)
+# qc += RZ(np.pi / 4).on(0)
+# qc += RZ(np.pi / 4).on(1)
+# qc += RZ(np.pi / 4).on(2)
+# qc += X.on(1, 0)
+# qc += X.on(0, 2)
+# qc += X.on(2, 1)
+# qc += RZ(np.pi / 4).on(0)
+# qc += X.on(0, 1)
+# qc += RZ(-np.pi / 4).on(0)
+# qc += RZ(np.pi / 4).on(1)
+# qc += RZ(-np.pi / 4).on(2)
+# qc += X.on(0, 2)
+# qc += X.on(2, 1)
+# qc += X.on(1, 0)
+# qc += H.on(2)
+# qc += X.on(0)
+# qc += X.on(2)
+# qc += Z.on(0)
+# qc += Z.on(1)
+# qc += Measure('q0').on(0)
+# qc += Measure('q1').on(1)
+# qc += Measure('q2').on(2)
+qc = Circuit()
+qc += X.on(0)
+qc += X.on(1)
+qc += X.on(0)
+qc += Z.on(1)
+qc += X.on(2)
+qc += H.on(2)
+qc += RZ(np.pi / 4).on(0)
+qc += RZ(np.pi / 4).on(1)
+qc += RZ(np.pi / 4).on(2)
+qc += X.on(1, 0)
+qc += X.on(0, 2)
+qc += X.on(2, 1)
+qc += RZ(np.pi / 4).on(0)  # 807
+
+
+
+# qc += X.on(0, 1)
+# qc += RZ(-np.pi / 4).on(0)
+# qc += RZ(np.pi / 4).on(1)
+# qc += RZ(-np.pi / 4).on(2)
+# qc += X.on(0, 2)
+# qc += S.on(0)
+# qc += X.on(2, 1)
+# qc += X.on(1, 0)
+# qc += H.on(2)
+# qc += X.on(0)
+# qc += X.on(2)
+# qc += Z.on(0)
+# qc += Z.on(1)
+
+qc += X.on(0, 1)
+qc += RZ(-np.pi / 4).on(2)
+qc += X.on(0, 2)
+qc += RZ(-np.pi / 4).on(0)
+
+qc += RZ(np.pi / 4).on(1)
+
+
+qc += X.on(2, 1)
+
+
+
+qc += S.on(0)
+qc += H.on(2)
+qc += X.on(1, 0)
+qc += X.on(0)
+qc += X.on(2)
+qc += Z.on(0)
+qc += Z.on(1)
+qc += Measure('q0').on(0)
+qc += Measure('q1').on(1)
+qc += Measure('q2').on(2)
+sim = Simulator('mqvector', 3)
+result = sim.sampling(qc, shots=1000)
+print(result)
