@@ -140,11 +140,11 @@ class ECQCOManager:
         machine.run(init_prog, shots)
         baseline_count = machine.result().get_counts()
         start = time.process_time()  # CPU时间（秒）
-        # apply QCOO
+        # 执行量子输出混淆并生成解密密钥
         qcoo = QCOOManager(n_qubits, self.program_path, result_path)
         QCOO_path, final_key = qcoo.QCOO(self.init_state)
-        # apply QCSO
-        ecqco_circ, ECQCO_count, depth_without_single, depth = QCSO(QCOO_path, self.result_path, lamb_param=2,
+        # 执行量子结构混淆和本地仿真
+        ecqco_circ, ECQCO_count, depth_without_single, depth = QCSO(QCOO_path, self.result_path, lamb_param=True,
                                                                     total_shots=shots)
         end = time.process_time()
         self.cpu_duration = end - start

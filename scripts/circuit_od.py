@@ -384,6 +384,7 @@ class QCSOManager:
             skeleton_flag :
         """
         n_rows, qubits = analog_table.shape
+        XY_8_time = (self.gate_lengths.get('X', [0])[0] + self.gate_lengths.get('Y', [0])[0]) * 4
         XY_4_time = (self.gate_lengths.get('X', [0])[0] + self.gate_lengths.get('Y', [0])[0]) * 2
         XX_time = self.gate_lengths.get('X', [0])[0] * 2
         RZ_time = self.gate_lengths.get('RZ', [0])[0]
@@ -424,6 +425,14 @@ class QCSOManager:
             rest_free_time = space_time[1] - space_time[0]
             cur_free_time = space_time[0]
             gate_flag = 0
+            while rest_free_time >= XY_8_time:
+                # 优先在长空闲区间插入完整的XY8序列
+                for gate in ['X', 'Y', 'X', 'Y', 'Y', 'X', 'Y', 'X']:
+                    cur_free_time += self.gate_lengths.get(gate, [0])[0]
+                    new_DD_sequence.append({cur_free_time: gate})
+                rest_free_time -= XY_8_time
+                gate_flag = 1
+
             while rest_free_time >= XY_4_time:
                 # add X-Y-X-Y sequence
                 cur_free_time += self.gate_lengths.get('X', [0])[0]
@@ -446,7 +455,8 @@ class QCSOManager:
                 rest_free_time -= XX_time
                 gate_flag = 1
 
-            if rest_free_time >= RZ_time:
+            # 根据lambda参数决定是否处理剩余的短空闲区间
+            if rest_free_time >= RZ_time and self.lamb_param:
                 # add RZ-RZ sequence and Merge one of the RZs with the adjacent single gate
                 # Get information about the previous quantum gate of the current simulation frame
 

@@ -1,5 +1,6 @@
 import glob
 import os
+import random
 
 from pyqpanda3.core import *
 import numpy as np
@@ -25,10 +26,9 @@ class QCOOManager:
 
     def generate_key(self) -> Tuple[List[int], List[int]]:
         """Generate quantum one-time pad key (a, b)"""
-        # a = [random.randint(0, 1) for _ in range(self.n_qubits)]
-        # b = [random.randint(0, 1) for _ in range(self.n_qubits)]
-        a = [1, 0, 1]
-        b = [0, 1, 0]
+        # 为每个量子比特随机生成独立的X密钥和Z密钥
+        a = [random.randint(0, 1) for _ in range(self.n_qubits)]
+        b = [random.randint(0, 1) for _ in range(self.n_qubits)]
         self.key = (a, b)
         return self.key
 
@@ -148,10 +148,9 @@ class QCOOManager:
             new_a[i], new_a[j] = new_a[i], new_a[i] ^ new_a[j]
             new_b[i], new_b[j] = new_b[i] ^ new_b[j], new_b[j]
         elif gate_type == "CZ":
-            # CZ门: 控制位i, 目标位j
+            # CZ门保持X密钥不变，并交叉更新两个量子比特的Z密钥
             i, j = targets[0], targets[1]
-            new_a[i], new_a[j] = new_a[i], new_a[i] ^ new_a[j]
-            new_b[i], new_b[j] = new_b[i] ^ new_b[j], new_b[j]
+            new_b[i], new_b[j] = b[i] ^ a[j], b[j] ^ a[i]
 
         return (new_a, new_b)
 
