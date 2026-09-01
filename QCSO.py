@@ -92,7 +92,7 @@ def make_qubit_length_same(analog_frame):
     Returns:
         analog_frame (DataFrame): Analog frame after adjustment
     """
-    # 步骤1：确定所有列中最大的'measure'标签
+    # 步骤1：确定所有列中最大的'Measure'标签
     max_measure_idx = None
     for col in analog_frame.columns:
         measure_indices = analog_frame.index[analog_frame[col] == 'Measure'].tolist()
@@ -101,7 +101,9 @@ def make_qubit_length_same(analog_frame):
             if max_measure_idx is None or current_max > max_measure_idx:
                 max_measure_idx = current_max
 
-            # 步骤2：处理每列，移动最后出现的'Measure'    if max_measure_idx is not None:        for col in analog_frame.columns:
+    # 步骤2：处理每列，移动最后出现的'Measure'
+    if max_measure_idx is not None:
+        for col in analog_frame.columns:
             # 找到该列最后出现的'Measure'索引
             measure_indices = analog_frame.index[analog_frame[col] == 'Measure'].tolist()
             if not measure_indices:
@@ -252,8 +254,9 @@ def QCSO(program, new_program_path, lamb_param, total_shots):
     openqasm.to_file(new_program_path, qcso_manager.circ)
 
     print(f'ECQCO circuit successfully saved to {new_program_path}')
-    return qcso_manager.circ, qcso_manager.circ.depth(with_single=True, with_barrier=False), qcso_manager.circ.depth(
-        with_single=False, with_barrier=False), ECQCO_counts
+    depth = qcso_manager.circ.depth(with_single=True, with_barrier=False)
+    depth_without_single = qcso_manager.circ.depth(with_single=False, with_barrier=False)
+    return qcso_manager.circ, ECQCO_counts[0].data, depth_without_single, depth
 
 
 if __name__ == '__main__':
@@ -264,4 +267,4 @@ if __name__ == '__main__':
     for program_ in filelist:
         path, program_name = os.path.split(program_)
         each_program_path = os.path.join(NEW_PATH, program_name)
-        QCSO(program_, each_program_path, lamb_param=2, total_shots=10000)
+        QCSO(program_, each_program_path, lamb_param=True, total_shots=10000)
